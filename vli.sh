@@ -32,6 +32,7 @@ root_label=''
 hdd_ssd=''
 current_xkeyboard_layout=''
 user_keyboard_layout=''
+uki_yn='n'
 
 # Constants
 
@@ -43,6 +44,18 @@ regex_EFISTUB="[Ee][Ff][Ii][Ss][Tt][Uu][Bb]"
 regex_GRUB2="[Gg][Rr][Uu][Bb][2]"
 regex_ROOT="[Rr][Oo][Oo][Tt]"
 void_packages_repo="https://github.com/void-linux/void-packages.git"
+
+# Configuration Constants
+
+# DRACUT
+DRACUT_HOSTONLY="
+hostonly=yes
+hostonly_cmdline=no
+"
+DRACUT_UEFI="
+uefi=yes
+uefi_stub=/usr/lib/gummiboot/linuxx64.efi.stub\n
+"
 
 # Colours
 
@@ -221,7 +234,8 @@ EOF
   ln -s /etc/sv/NetworkManager /etc/runit/runsvdir/default/
 
   echo -e -n "\nAdding needed dracut configuration files...\n"
-  echo -e "hostonly=yes\nhostonly_cmdline=yes" >>/etc/dracut.conf.d/00-hostonly.conf
+  echo -e "$DRACUT_HOSTONLY" >> /etc/dracut.conf.d/00-hostonly.conf
+  [[ $uki_yn =~ $regex_YES ]] && echo -e "$DRACUT_UEFI" >> /etc/dracut.conf.d/00-uefi-unified-kernel-image.conf
   echo -e "add_dracutmodules+=\" crypt btrfs lvm resume \"" >>/etc/dracut.conf.d/20-addmodules.conf
   echo -e "tmpdir=/tmp" >>/etc/dracut.conf.d/30-tmpfs.conf
 
@@ -410,7 +424,9 @@ function install_bootloader {
     fi
 
     if [[ $bootloader =~ $regex_EFISTUB ]]; then
-      echo -e -n "\nBootloader selected: ${BLUE_LIGHT}$bootloader${NORMAL}.\n"
+      clear
+      header_ib
+      echo -e -n "\nBootloader selected: ${BLUE_LIGHT}$bootloader${NORMAL}.\n" 
       echo -e -n "\nMounting $boot_partition to /boot...\n"
       mkdir /TEMPBOOT
       cp -pr /boot/* /TEMPBOOT/
@@ -418,25 +434,39 @@ function install_bootloader {
       mount -o rw,noatime "$boot_partition" /boot
       cp -pr /TEMPBOOT/* /boot/
       rm -rf /TEMPBOOT
-      echo -e -n "\nSetting correct options in /etc/default/efibootmgr-kernel-hook...\n"
-      sed -i "/MODIFY_EFI_ENTRIES=0/s/0/1/" /etc/default/efibootmgr-kernel-hook
-      if [[ $encryption_yn =~ $regex_YES ]]; then
-        sed -i "/# OPTIONS=/s/.*/OPTIONS=\"loglevel=4 rd.auto=1 rd.luks.name=$LUKS_UUID=$encrypted_name\"/" /etc/default/efibootmgr-kernel-hook
-        if [[ "$hdd_ssd" == "ssd" ]]; then
-          sed -i "/OPTIONS=/s/\"$/ rd.luks.allow-discards=$LUKS_UUID&/" /etc/default/efibootmgr-kernel-hook
+      if [[ $uki_yn =~ $regex_NO ]]; then 
+        echo -e -n "\nSetting correct options in /etc/default/efibootmgr-kernel-hook...\n"
+        sed -i "/MODIFY_EFI_ENTRIES=0/s/0/1/" /etc/default/efibootmgr-kernel-hook
+        if [[ $encryption_yn =~ $regex_YES ]]; then
+          sed -i "/# OPTIONS=/s/.*/OPTIONS=\"loglevel=4 rd.auto=1 rd.luks.name=$LUKS_UUID=$encrypted_name\"/" /etc/default/efibootmgr-kernel-hook
+          if [[ "$hdd_ssd" == "ssd" ]]; then
+            sed -i "/OPTIONS=/s/\"$/ rd.luks.allow-discards=$LUKS_UUID&/" /etc/default/efibootmgr-kernel-hook
+          fi
+        elif { [[ $encryption_yn =~ $regex_NO ]]; } && { [[ $lvm_yn =~ $regex_YES ]]; }; then
+          sed -i "/# OPTIONS=/s/.*/OPTIONS=\"loglevel=4 rd.auto=1\"/" /etc/default/efibootmgr-kernel-hook
+        else
+          sed -i "/# OPTIONS=/s/.*/OPTIONS=\"loglevel=4\"/" /etc/default/efibootmgr-kernel-hook
         fi
-      elif { [[ $encryption_yn =~ $regex_NO ]]; } && { [[ $lvm_yn =~ $regex_YES ]]; }; then
-        sed -i "/# OPTIONS=/s/.*/OPTIONS=\"loglevel=4 rd.auto=1\"/" /etc/default/efibootmgr-kernel-hook
-      else
-        sed -i "/# OPTIONS=/s/.*/OPTIONS=\"loglevel=4\"/" /etc/default/efibootmgr-kernel-hook
+        sed -i "/# DISK=/s|.*|DISK=\"\$(lsblk -pd -no pkname \$(findmnt -enr -o SOURCE -M /boot))\"|" /etc/default/efibootmgr-kernel-hook
+        sed -i "/# PART=/s_.*_PART=\"\$(lsblk -pd -no pkname \$(findmnt -enr -o SOURCE -M /boot) | grep --color=never -Eo \\\\\"[0-9]+\$\\\\\")\"_" /etc/default/efibootmgr-kernel-hook
+        echo -e -n "\nModifying /etc/kernel.d/post-install/50-efibootmgr to keep EFI entry after reboot...\n"
+        sed -i "/efibootmgr -qo \$bootorder/s/^/#/" /etc/kernel.d/post-install/50-efibootmgr
+        echo -e -n "\n${RED_LIGHT}Keep in mind that to keep the new EFI entry after each reboot,${NORMAL}\n"
+        echo -e -n "${RED_LIGHT}the last line of /etc/kernel.d/post-install/50-efibootmgr has been commented.${NORMAL}\n"
+        echo -e -n "${RED_LIGHT}Probably you will have to comment the same line after each efibootmgr update.${NORMAL}\n\n"
+      elif [[ $uki_yn =~ $regex_YES ]]; then
+        echo -e -n "Setting kernel commadline args..."
+	cat>/etc/dracut.conf.d/30-unified-kernel-image-addmodules.conf<<EndOfDracutKernelArgs
+loglevel=4
+$([[ $encryption_yn =~ $regex_YES ]] && \
+    echo """\
+rd.auto=1
+rd.luks.name=$LUKS_UUID=$encrypted_name
+$([[ "$hdd_ssd" == "ssd" ]] && echo -n rd.luks.allow-discards=$LUKS_UUID)""" || \
+[[ $lvm_yn =~ $regex_YES ]] && echo -n rd.auto=1)
+EndOfDracutKernelArgs
+	press_any_key_to_continue
       fi
-      sed -i "/# DISK=/s|.*|DISK=\"\$(lsblk -pd -no pkname \$(findmnt -enr -o SOURCE -M /boot))\"|" /etc/default/efibootmgr-kernel-hook
-      sed -i "/# PART=/s_.*_PART=\"\$(lsblk -pd -no pkname \$(findmnt -enr -o SOURCE -M /boot) | grep --color=never -Eo \\\\\"[0-9]+\$\\\\\")\"_" /etc/default/efibootmgr-kernel-hook
-      echo -e -n "\nModifying /etc/kernel.d/post-install/50-efibootmgr to keep EFI entry after reboot...\n"
-      sed -i "/efibootmgr -qo \$bootorder/s/^/#/" /etc/kernel.d/post-install/50-efibootmgr
-      echo -e -n "\n${RED_LIGHT}Keep in mind that to keep the new EFI entry after each reboot,${NORMAL}\n"
-      echo -e -n "${RED_LIGHT}the last line of /etc/kernel.d/post-install/50-efibootmgr has been commented.${NORMAL}\n"
-      echo -e -n "${RED_LIGHT}Probably you will have to comment the same line after each efibootmgr update.${NORMAL}\n\n"
       break
 
     elif [[ $bootloader =~ $regex_GRUB2 ]]; then
@@ -2977,7 +3007,7 @@ function format_create_install_system {
             kill_script
           fi
           if ! XBPS_ARCH="$ARCH" xbps-install -Suvy -r /mnt -R "$REPO" base-system btrfs-progs cryptsetup grub-x86_64-efi \
-            efibootmgr lvm2 grub-btrfs grub-btrfs-runit NetworkManager bash-completion nano gcc apparmor git curl \
+            efibootmgr gummiboot-efistub lvm2 grub-btrfs grub-btrfs-runit NetworkManager bash-completion nano gcc apparmor git curl \
             util-linux tar coreutils binutils xtools fzf xmirror plocate ictree xkeyboard-config ckbcomp void-repo-nonfree; then
             echo -e -n "\n${RED_LIGHT}Something went wrong, killing script...${NORMAL}\n\n"
             kill_script
@@ -3021,9 +3051,10 @@ function format_create_install_system {
 
           BTRFS_OPT="$BTRFS_OPT" boot_partition="$boot_partition" encryption_yn="$encryption_yn" luks_ot="$luks_ot" root_partition="$root_partition" \
             encrypted_name="$encrypted_name" lvm_yn="$lvm_yn" vg_name="$vg_name" lv_root_name="$lv_root_name" user_drive="$user_drive" final_drive="$final_drive" \
-            user_keyboard_layout="$user_keyboard_layout" hdd_ssd="$hdd_ssd" void_packages_repo="$void_packages_repo" ARCH="$ARCH" BLUE_LIGHT="$BLUE_LIGHT" \
+            user_keyboard_layout="$user_keyboard_layout" hdd_ssd="$hdd_ssd" uki_yn="$uki_yn" void_packages_repo="$void_packages_repo" ARCH="$ARCH" BLUE_LIGHT="$BLUE_LIGHT" \
             BLUE_LIGHT_FIND="$BLUE_LIGHT_FIND" GREEN_DARK="$GREEN_DARK" GREEN_LIGHT="$GREEN_LIGHT" NORMAL="$NORMAL" NORMAL_FIND="$NORMAL_FIND" RED_LIGHT="$RED_LIGHT" BLACK_FG_WHITE_BG=$BLACK_FG_WHITE_BG regex_YES=$regex_YES regex_NO=$regex_NO regex_BACK=$regex_BACK regex_EFISTUB=$regex_EFISTUB regex_GRUB2=$regex_GRUB2 \
             regex_ROOT=$regex_ROOT \
+	    DRACUT_HOSTONLY="$DRACUT_HOSTONLY" DRACUT_UEFI="$DRACUT_UEFI" \
             chroot /mnt/ /bin/bash "$HOME"/chroot.sh
 
           clear
@@ -3061,6 +3092,31 @@ function format_create_install_system {
       done
     fi
   fi
+}
+
+function header_sko {
+
+  echo -e -n "${GREEN_DARK}#######################################${NORMAL}\n"
+  echo -e -n "${GREEN_DARK}# VLI #${NORMAL}        ${GREEN_LIGHT}Kernel Options${NORMAL}        ${GREEN_DARK}#${NORMAL}\n"
+  echo -e -n "${GREEN_DARK}#######################################${NORMAL}\n"
+
+}
+
+function set_kernel_options {
+    select opt in "Yes" "No"; do
+	case $opt in
+	    "Yes")
+		uki_yn="y"
+		break
+		;;
+	    "No")
+		uki_yn="n"
+		break
+		;;
+	    *)
+		echo "invalid option $REPLY";;
+	esac
+    done
 }
 
 function outro {
@@ -3186,7 +3242,16 @@ function main {
 
     echo
 
-    echo -e -n "\n11) Install base system and chroot inside"
+    echo -e -n "\n11) Unified Kernel Image\n"
+    if [[ $uki_yn =~ ${regex_YES} ]]; then
+      echo -e -n "${GREEN_LIGHT}\t\t\tYES${NORMAL}"
+    elif [[ $uki_yn =~ ${regex_NO} ]]; then
+      echo -e -n "${RED_LIGHT}\t\t\tNO${NORMAL}"
+    fi 
+
+    echo
+
+    echo -e -n "\n12) Install base system and chroot inside"
 
     echo
 
@@ -3254,6 +3319,11 @@ function main {
       ;;
     11)
       clear
+      set_kernel_options
+      clear
+      ;;
+    12)
+      clear
       format_create_install_system
       clear
       ;;
@@ -3273,6 +3343,7 @@ function main {
 check_if_bash
 check_if_run_as_root
 check_if_uefi
+[[ -f ./vars.env ]] && source ./vars.env # for rapid testing of the installer
 create_chroot_script
 create_btrfs_map_physical_c
 intro
